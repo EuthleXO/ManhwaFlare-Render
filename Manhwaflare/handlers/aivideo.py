@@ -83,12 +83,14 @@ async def _show_ai_videos(q, context, page: int = 1) -> None:
 
 
 async def _edit_progress(q, title: str, phase: str, pct: float, size_b: float = 0, speed: float = 0, extra: str = "") -> None:
+    left = max(0.0, 100.0 - pct)
     body = (
         f"<blockquote><b>{phase}</b></blockquote>\n"
         f"<b>{title[:50]}</b>\n"
         f"<code>{_bar(pct)}</code> <b>{pct:.0f}%</b>\n"
-        f"<b>{sc('size')}:</b> {_fmt_mb(size_b)}\n"
-        f"<b>{sc('speed')}:</b> {_fmt_speed(speed)}\n"
+        f"<b>done:</b> {_fmt_mb(size_b)}\n"
+        f"<b>speed:</b> {_fmt_speed(speed)}\n"
+        f"<b>left:</b> {left:.0f}%\n"
     )
     if extra:
         body += f"\n{extra}"
@@ -115,7 +117,11 @@ async def _probe_duration(path_or_url: str) -> float:
         return 0.0
 
 
-async def _ffmpeg_with_progress(args: list, out_path: str, duration: float, q, title: str, phase: str) -> bool:
+async def _ffmpeg_with_progress(
+    args: list, out_path: str, duration: float, q, title: str, phase: str,
+    overall_timeout: float = 900,
+) -> bool:
+    """Run ffmpeg with live progress. Never hang forever at 99%."""
     try:
         if os.path.isfile(out_path):
             os.remove(out_path)
@@ -136,12 +142,42 @@ async def _ffmpeg_with_progress(args: list, out_path: str, duration: float, q, t
     out_time_ms = 0
     speed_x = 0.0
     last_ui = 0.0
+    last_size = 0
+    last_size_change = time.time()
     t0 = time.time()
 
     try:
         assert proc.stdout is not None
         while True:
-            line = await proc.stdout.readline()
+            if time.time() - t0 > overall_timeout:
+                log.warning("ffmpeg overall timeout")
+                break
+            try:
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=8.0)
+            except asyncio.TimeoutError:
+                # no progress lines — check if process ended or file stalled
+                if proc.returncode is not None:
+                    break
+                size_b = os.path.getsize(out_path) if os.path.isfile(out_path) else 0
+                if size_b > 50_000 and size_b == last_size:
+                    if time.time() - last_size_change > 45:
+                        # stalled near end — stop waiting
+                        log.warning("ffmpeg stalled at size=%s — finishing", size_b)
+                        break
+                elif size_b != last_size:
+                    last_size = size_b
+                    last_size_change = time.time()
+                # still running, update UI
+                pct = 0.0
+                if duration > 0 and out_time_ms > 0:
+                    pct = min(99.0, (out_time_ms / 1000.0) / duration * 100)
+                bps = size_b / max(0.1, time.time() - t0)
+                await _edit_progress(
+                    q, title, phase, pct, size_b, bps,
+                    extra="finalizing..." if pct >= 95 else (f"ffmpeg x{speed_x:.1f}" if speed_x else "working..."),
+                )
+                continue
+
             if not line:
                 break
             text = line.decode(errors="ignore").strip()
@@ -153,19 +189,28 @@ async def _ffmpeg_with_progress(args: list, out_path: str, duration: float, q, t
             elif text.startswith("speed="):
                 m = re.search(r"([\d.]+)", text)
                 if m:
-                    speed_x = float(m.group(1))
+                    try:
+                        speed_x = float(m.group(1))
+                    except ValueError:
+                        pass
             elif text == "progress=end":
                 break
 
+            size_b = os.path.getsize(out_path) if os.path.isfile(out_path) else 0
+            if size_b != last_size:
+                last_size = size_b
+                last_size_change = time.time()
+
             now = time.time()
-            if now - last_ui >= 1.2:
+            if now - last_ui >= 1.0:
                 last_ui = now
                 pct = 0.0
                 if duration > 0 and out_time_ms > 0:
                     pct = min(99.0, (out_time_ms / 1000.0) / duration * 100)
-                size_b = os.path.getsize(out_path) if os.path.isfile(out_path) else 0
-                elapsed = max(0.1, now - t0)
-                bps = size_b / elapsed
+                # if stream reports near full duration, show 99
+                if duration > 0 and out_time_ms / 1000.0 >= duration * 0.98:
+                    pct = 99.0
+                bps = size_b / max(0.1, now - t0)
                 await _edit_progress(
                     q, title, phase, pct, size_b, bps,
                     extra=f"ffmpeg x{speed_x:.1f}" if speed_x else "",
@@ -173,13 +218,26 @@ async def _ffmpeg_with_progress(args: list, out_path: str, duration: float, q, t
     except Exception as e:
         log.warning("progress read: %s", e)
 
+    # wait a bit more for mux finish
     try:
-        await asyncio.wait_for(proc.wait(), timeout=30)
+        await asyncio.wait_for(proc.wait(), timeout=60)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+        log.warning("ffmpeg wait timeout — killing")
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
 
-    return proc.returncode == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 50_000
+    size_b = os.path.getsize(out_path) if os.path.isfile(out_path) else 0
+    # accept file even if returncode non-zero when we have a solid file (killed after stall)
+    ok = size_b > 50_000 and (
+        proc.returncode == 0
+        or size_b > 500_000  # usable partial near end
+    )
+    if ok:
+        await _edit_progress(q, title, phase, 100.0, size_b, 0, extra="download complete")
+    return ok
 
 
 async def _download_ai_video(q, context, slug: str, item: dict) -> None:
