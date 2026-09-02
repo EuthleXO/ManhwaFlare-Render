@@ -1,4 +1,4 @@
-"""AI videos — list, high-quality download with progress, screenshots."""
+"""AI videos — MTProto-only HQ download, progress, screenshots."""
 from __future__ import annotations
 
 import asyncio
@@ -8,9 +8,8 @@ import re
 import shutil
 import tempfile
 import time
-from pathlib import Path
 
-from telegram import InputFile, InputMediaPhoto
+from telegram import InputMediaPhoto
 from telegram.ext import ContextTypes
 
 from Manhwaflare.nav import nav_enter
@@ -18,11 +17,11 @@ from Manhwaflare.scrapers import aivideos as aivideos_mod
 from Manhwaflare.text import sc
 from Manhwaflare.ui.keyboards import btn, back_kb
 from Manhwaflare.ui.wait import panel_edit
+from Manhwaflare.mtproto import mtproto_enabled, send_video_file, send_photos
 
 log = logging.getLogger("mf.aivideo")
 
-# Standard Bot API limit is 50MB. Local Bot API can go to 2GB via TELEGRAM_LOCAL_API.
-MAX_BOT_BYTES = int(os.getenv("TG_MAX_FILE_MB", "49")) * 1024 * 1024
+MAX_MTPROTO_BYTES = int(os.getenv("TG_MTPROTO_MAX_MB", "1900")) * 1024 * 1024
 FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
 FFPROBE = shutil.which("ffprobe") or "ffprobe"
 
@@ -67,6 +66,8 @@ async def _show_ai_videos(q, context, page: int = 1) -> None:
         "",
         sc("tap a video to download"),
     ]
+    if not mtproto_enabled():
+        lines += ["", "<i>Set API_ID + API_HASH for MTProto uploads</i>"]
     rows = []
     for i, v in enumerate(items[:24]):
         title = (v.get("title") or v.get("slug") or "?")[:40]
@@ -92,7 +93,11 @@ async def _edit_progress(q, title: str, phase: str, pct: float, size_b: float = 
     if extra:
         body += f"\n{extra}"
     try:
-        await panel_edit(q, body, back_kb([btn(sc("AI videos"), "p:aivideos", "primary")]))
+        await panel_edit(
+            q, body,
+            back_kb([btn(sc("AI videos"), "p:aivideos", "primary")]),
+            show_wait=False,
+        )
     except Exception:
         pass
 
@@ -111,7 +116,6 @@ async def _probe_duration(path_or_url: str) -> float:
 
 
 async def _ffmpeg_with_progress(args: list, out_path: str, duration: float, q, title: str, phase: str) -> bool:
-    """Run ffmpeg, parse -progress pipe:1 for % / speed."""
     try:
         if os.path.isfile(out_path):
             os.remove(out_path)
@@ -160,10 +164,12 @@ async def _ffmpeg_with_progress(args: list, out_path: str, duration: float, q, t
                 if duration > 0 and out_time_ms > 0:
                     pct = min(99.0, (out_time_ms / 1000.0) / duration * 100)
                 size_b = os.path.getsize(out_path) if os.path.isfile(out_path) else 0
-                # approximate bytes/sec from file growth
                 elapsed = max(0.1, now - t0)
                 bps = size_b / elapsed
-                await _edit_progress(q, title, phase, pct, size_b, bps, extra=f"ffmpeg ×{speed_x:.1f}" if speed_x else "")
+                await _edit_progress(
+                    q, title, phase, pct, size_b, bps,
+                    extra=f"ffmpeg x{speed_x:.1f}" if speed_x else "",
+                )
     except Exception as e:
         log.warning("progress read: %s", e)
 
@@ -173,12 +179,23 @@ async def _ffmpeg_with_progress(args: list, out_path: str, duration: float, q, t
         proc.kill()
         await proc.wait()
 
-    ok = proc.returncode == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 50_000
-    return ok
+    return proc.returncode == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 50_000
 
 
 async def _download_ai_video(q, context, slug: str, item: dict) -> None:
     import aiohttp
+
+    if not mtproto_enabled():
+        await panel_edit(
+            q,
+            "<blockquote><b>MTProto required</b></blockquote>\n"
+            "Set <b>API_ID</b> + <b>API_HASH</b> in Render Environment.\n"
+            "<code>https://my.telegram.org</code>\n\n"
+            "Video upload uses <b>MTProto only</b> (~2GB).",
+            back_kb([btn(sc("AI videos"), "p:aivideos", "primary")]),
+            show_wait=False,
+        )
+        return
 
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45)) as session:
@@ -232,9 +249,7 @@ async def _download_ai_video(q, context, slug: str, item: dict) -> None:
 
     await _edit_progress(q, title, f"› › {sc('downloading')} HQ", 1, 0, 0)
 
-    # High quality attempts (prefer quality, only compress if over limit)
     attempts = [
-        # HQ stream copy full
         {
             "phase": f"› › {sc('downloading')} HQ",
             "args": [
@@ -245,7 +260,6 @@ async def _download_ai_video(q, context, slug: str, item: dict) -> None:
                 out_path,
             ],
         },
-        # HQ re-encode 720p
         {
             "phase": f"› › {sc('encoding')} 720p",
             "args": [
@@ -254,19 +268,6 @@ async def _download_ai_video(q, context, slug: str, item: dict) -> None:
                 "-vf", "scale='min(1280,iw)':-2",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "20",
                 "-c:a", "aac", "-b:a", "160k",
-                "-movflags", "+faststart",
-                out_path,
-            ],
-        },
-        # Fit Telegram 50MB — 480p
-        {
-            "phase": f"› › {sc('compressing')} for Telegram",
-            "args": [
-                "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
-                "-i", hls,
-                "-vf", "scale='min(854,iw)':-2",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
-                "-c:a", "aac", "-b:a", "96k",
                 "-movflags", "+faststart",
                 out_path,
             ],
@@ -280,11 +281,10 @@ async def _download_ai_video(q, context, slug: str, item: dict) -> None:
         if not ok:
             continue
         size = os.path.getsize(out_path)
-        if size <= MAX_BOT_BYTES:
+        if size <= MAX_MTPROTO_BYTES:
             break
-        ok = False  # too big → next attempt
+        ok = False
 
-    # store for screenshots
     context.user_data["aiv_last"] = {
         "path": out_path if ok else "",
         "tmpdir": tmpdir,
@@ -296,70 +296,65 @@ async def _download_ai_video(q, context, slug: str, item: dict) -> None:
         "size": size,
     }
 
-    cap = (
-        f"<blockquote><b>{manga}</b></blockquote>\n"
-        f"<b>{title}</b>\n"
-        f"<b>{sc('size')}:</b> {_fmt_mb(size)}\n"
-        f"<a href='{detail.get('page_url','')}'>source</a>"
-    )[:1024]
-
     try:
-        if ok and size <= MAX_BOT_BYTES:
-            await _edit_progress(q, title, f"› › {sc('uploading')}", 95, size, 0)
-            with open(out_path, "rb") as f:
-                try:
-                    await context.bot.send_video(
-                        chat_id=q.message.chat_id,
-                        video=InputFile(f, filename=f"{slug[:30]}.mp4"),
-                        caption=cap,
-                        parse_mode="HTML",
-                        supports_streaming=True,
-                    )
-                except Exception:
-                    f.seek(0)
-                    await context.bot.send_document(
-                        chat_id=q.message.chat_id,
-                        document=InputFile(f, filename=f"{slug[:30]}.mp4"),
-                        caption=cap,
-                        parse_mode="HTML",
-                    )
-            # Keep file for screenshots briefly — copy to longer path
-            shot_path = os.path.join(tmpdir, "for_shots.mp4")
-            try:
-                if out_path != shot_path:
-                    shutil.copy2(out_path, shot_path)
-                context.user_data["aiv_last"]["path"] = shot_path
-            except Exception:
-                pass
+        sent = False
+        if ok and 0 < size <= MAX_MTPROTO_BYTES:
+            chat_id = q.message.chat_id
+            last_pct = [-1]
 
-            await panel_edit(
-                q,
-                f"<blockquote><b>{sc('sent')}</b></blockquote>\n"
-                f"<b>{title}</b>\n"
-                f"<code>{_bar(100)}</code> <b>100%</b>\n"
-                f"<b>{sc('size')}:</b> {_fmt_mb(size)}",
-                back_kb(
-                    [btn(sc("screenshots · 10"), f"p:aivshots:{slug[:40]}", "success")],
-                    [btn(sc("AI videos"), "p:aivideos", "primary")],
-                ),
-            )
+            async def up_prog(cur, total):
+                if not total:
+                    return
+                pct = min(99.0, cur / total * 100)
+                if int(pct) == last_pct[0]:
+                    return
+                last_pct[0] = int(pct)
+                await _edit_progress(
+                    q, title, "› › uploading MTProto", pct, cur, 0,
+                    extra=f"{_fmt_mb(cur)} / {_fmt_mb(total)}",
+                )
+
+            await _edit_progress(q, title, "› › uploading MTProto", 1, size, 0)
+            plain_cap = f"{manga}\n{title}\n{detail.get('page_url') or ''}".strip()
+            sent = await send_video_file(chat_id, out_path, plain_cap, progress=up_prog)
+
+            if sent:
+                shot_path = os.path.join(tmpdir, "for_shots.mp4")
+                try:
+                    if out_path != shot_path:
+                        shutil.copy2(out_path, shot_path)
+                    context.user_data["aiv_last"]["path"] = shot_path
+                except Exception:
+                    pass
+                await panel_edit(
+                    q,
+                    f"<blockquote><b>{sc('sent')}</b></blockquote>\n"
+                    f"<b>{title}</b>\n"
+                    f"<code>{_bar(100)}</code> <b>100%</b>\n"
+                    f"<b>{sc('size')}:</b> {_fmt_mb(size)}\n"
+                    f"<i>MTProto</i>",
+                    back_kb(
+                        [btn(sc("screenshots · 10"), f"p:aivshots:{slug[:40]}", "success")],
+                        [btn(sc("AI videos"), "p:aivideos", "primary")],
+                    ),
+                    show_wait=False,
+                )
+            else:
+                await panel_edit(
+                    q,
+                    f"<b>{title}</b>\nMTProto upload failed\n"
+                    f"<a href='{hls}'>stream m3u8</a>",
+                    back_kb([btn(sc("AI videos"), "p:aivideos", "primary")]),
+                    show_wait=False,
+                )
         else:
-            await context.bot.send_message(
-                q.message.chat_id,
-                f"<blockquote><b>{manga or 'AI Video'}</b></blockquote>\n"
-                f"<b>{title}</b>\n\n"
-                f"{sc('file exceeds telegram bot limit')} ({MAX_BOT_BYTES // 1024 // 1024}MB)\n"
-                f"<a href='{hls}'>stream m3u8</a>\n"
-                f"<a href='{detail.get('page_url','')}'>open on site</a>",
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
             await panel_edit(
                 q,
-                f"<b>{title}</b>\n{sc('could not fit bot upload limit')}",
+                f"<b>{title}</b>\ndownload failed or file too large\n"
+                f"<a href='{hls}'>stream m3u8</a>",
                 back_kb([btn(sc("AI videos"), "p:aivideos", "primary")]),
+                show_wait=False,
             )
-            # cleanup
             try:
                 shutil.rmtree(tmpdir, ignore_errors=True)
             except Exception:
@@ -370,11 +365,20 @@ async def _download_ai_video(q, context, slug: str, item: dict) -> None:
         await panel_edit(
             q, f"<b>{sc('error')}</b>\n<code>{e}</code>",
             back_kb([btn(sc("AI videos"), "p:aivideos", "primary")]),
+            show_wait=False,
         )
 
 
 async def _send_screenshots(q, context, slug: str) -> None:
-    """Extract 10 screenshots from last downloaded video and send album."""
+    """Extract 10 screenshots — MTProto only."""
+    if not mtproto_enabled():
+        await panel_edit(
+            q, "MTProto required — set API_ID + API_HASH",
+            back_kb([btn(sc("AI videos"), "p:aivideos", "primary")]),
+            show_wait=False,
+        )
+        return
+
     info = context.user_data.get("aiv_last") or {}
     path = info.get("path") or ""
     title = info.get("title") or slug
@@ -382,10 +386,14 @@ async def _send_screenshots(q, context, slug: str) -> None:
         await panel_edit(
             q, sc("video file expired — download again"),
             back_kb([btn(sc("AI videos"), "p:aivideos", "primary")]),
+            show_wait=False,
         )
         return
 
-    await panel_edit(q, f"<b>› › {sc('capturing screenshots')}...</b>\n<code>{title[:50]}</code>", back_kb())
+    await panel_edit(
+        q, f"<b>› › {sc('capturing screenshots')}...</b>\n<code>{title[:50]}</code>",
+        back_kb(), show_wait=False,
+    )
     tmpdir = info.get("tmpdir") or tempfile.mkdtemp(prefix="aivs_")
     duration = await _probe_duration(path)
     if duration <= 0:
@@ -393,7 +401,6 @@ async def _send_screenshots(q, context, slug: str) -> None:
 
     frames = []
     for i in range(10):
-        # even spread, skip first/last 5%
         t = duration * (0.05 + 0.9 * i / 9)
         out = os.path.join(tmpdir, f"shot_{i:02d}.jpg")
         try:
@@ -408,38 +415,30 @@ async def _send_screenshots(q, context, slug: str) -> None:
                 frames.append(out)
         except Exception as e:
             log.warning("shot %s: %s", i, e)
-
-        pct = (i + 1) / 10 * 100
-        await _edit_progress(q, title, f"› › {sc('screenshots')}", pct, 0, 0, extra=f"{i+1}/10")
+        await _edit_progress(q, title, f"› › {sc('screenshots')}", (i + 1) / 10 * 100, 0, 0, extra=f"{i+1}/10")
 
     if not frames:
         await panel_edit(
             q, sc("could not extract screenshots"),
             back_kb([btn(sc("AI videos"), "p:aivideos", "primary")]),
+            show_wait=False,
         )
         return
 
-    # send as media groups (max 10)
-    media = []
-    files = []
-    try:
-        for i, fp in enumerate(frames[:10]):
-            f = open(fp, "rb")
-            files.append(f)
-            media.append(InputMediaPhoto(f, caption=f"{title[:40]} · {i+1}/10" if i == 0 else None))
-        await context.bot.send_media_group(chat_id=q.message.chat_id, media=media)
+    ok_shots = await send_photos(
+        q.message.chat_id, frames[:10], caption=f"{title[:40]} · screenshots",
+    )
+    if ok_shots:
         await panel_edit(
             q,
             f"<blockquote><b>{sc('screenshots sent')}</b></blockquote>\n"
             f"<b>{title}</b>\n{len(frames)} {sc('frames')}",
             back_kb([btn(sc("AI videos"), "p:aivideos", "primary")]),
+            show_wait=False,
         )
-    except Exception as e:
-        log.exception("shots send")
-        await panel_edit(q, f"<b>{sc('error')}</b>\n<code>{e}</code>", back_kb([btn(sc("AI videos"), "p:aivideos", "primary")]))
-    finally:
-        for f in files:
-            try:
-                f.close()
-            except Exception:
-                pass
+    else:
+        await panel_edit(
+            q, f"<b>{sc('error')}</b>\nMTProto screenshots failed",
+            back_kb([btn(sc("AI videos"), "p:aivideos", "primary")]),
+            show_wait=False,
+        )

@@ -8,6 +8,11 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
+# MTProto (Pyrogram) — large file upload up to ~2GB
+API_ID = int(os.getenv("API_ID", "0") or 0)
+API_HASH = os.getenv("API_HASH", "").strip()
+USE_MTPROTO = bool(API_ID and API_HASH and BOT_TOKEN)
+
 # Single owner only
 _env_owner = int(os.getenv("OWNER_ID", "0") or 0)
 OWNER_ID = _env_owner or 8681820826

@@ -440,14 +440,12 @@ async def on_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         item = items[idx]
         slug = item.get("slug") or ""
-        await panel_edit(q, f"<blockquote><b>{sc('downloading video')}...</b></blockquote>\n<code>{item.get('title','')}</code>", back_kb())
         await _download_ai_video(q, context, slug, item)
         return
 
     if action.startswith("aivep:"):
         slug = action.split(":", 1)[-1]
         context.user_data["_aiv_force"] = True
-        await panel_edit(q, f"<blockquote><b>{sc('downloading video')}...</b></blockquote>", back_kb())
         await _download_ai_video(q, context, slug, {"slug": slug, "title": slug})
         context.user_data.pop("_aiv_force", None)
         return

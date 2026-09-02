@@ -59,6 +59,15 @@ async def _run_worker_bg() -> None:
 
 async def post_init(app: Application) -> None:
     await db.connect()
+    try:
+        from Manhwaflare.mtproto import mtproto_enabled, get_client
+        if mtproto_enabled():
+            await get_client()
+            log.info("MTProto enabled (large uploads)")
+        else:
+            log.info("MTProto off — set API_ID + API_HASH for ~2GB uploads")
+    except Exception as e:
+        log.warning("MTProto init: %s", e)
     await db.set_setting("owner_id", OWNER_ID)
     cmds = [
         BotCommand("start", "Home panel"),
@@ -114,12 +123,19 @@ async def post_init(app: Application) -> None:
     me = await app.bot.get_me()
     log.info("bot @%s v%s", me.username, APP_VERSION)
     await db.add_log("info", f"started @{me.username} v{APP_VERSION}")
-    app.create_task(_start_health_server())
-    app.create_task(_run_worker_bg())
+    # schedule on running loop (avoid PTBUserWarning in post_init)
+    import asyncio
+    asyncio.create_task(_start_health_server())
+    asyncio.create_task(_run_worker_bg())
     log.info("upload worker started")
 
 
 async def post_shutdown(app: Application) -> None:
+    try:
+        from Manhwaflare.mtproto import stop_client
+        await stop_client()
+    except Exception:
+        pass
     await db.close()
 
 

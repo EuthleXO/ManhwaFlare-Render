@@ -53,13 +53,17 @@ async def _edit_raw(q, text: str, kb: InlineKeyboardMarkup | None = None) -> Non
         pass
 
 
-async def panel_edit(q, text: str, kb: InlineKeyboardMarkup, photo: bool = False) -> None:
+async def panel_edit(
+    q, text: str, kb: InlineKeyboardMarkup | None = None, photo: bool = False, show_wait: bool = True,
+) -> None:
+    """Edit callback message. show_wait=False for fast progress updates (no › › wait flash)."""
     text = (text or "")[:4000]
-    try:
-        await _edit_raw(q, wait_html(), None)
-        await asyncio.sleep(0.22)
-    except Exception:
-        pass
+    if show_wait:
+        try:
+            await _edit_raw(q, wait_html(), None)
+            await asyncio.sleep(0.18)
+        except Exception:
+            pass
     await _edit_raw(q, text, kb)
 
 
