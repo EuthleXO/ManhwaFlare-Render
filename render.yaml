@@ -1,0 +1,42 @@
+# ManhwaFlare-Render — free Web Service
+# https://github.com/EuthleXO/ManhwaFlare-Render
+#
+# REQUIRED env (Render Dashboard → Environment):
+#   BOT_TOKEN
+#   OWNER_ID          (your telegram numeric id)
+#   MONGODB_URI       MUST be full Atlas URI with real host:
+#                     mongodb+srv://user:pass@cluster0.XXXXX.mongodb.net/?retryWrites=true&w=majority
+#                     NOT cluster.mongodb.net (placeholder — causes DNS error)
+#
+# Atlas Network Access → Add IP → 0.0.0.0/0 (allow Render)
+
+services:
+  - type: web
+    name: manhwaflare-bot
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: PYTHONPATH=. python -m Manhwaflare.main
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: OWNER_ID
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: DATABASE_NAME
+        value: manhwaflare
+      - key: LOG_CHANNEL_ID
+        value: "-1003915347751"
+      - key: SUPPORT_GROUP
+        value: "https://t.me/+CZCfHr3AHKUwNTJk"
+      - key: SUPPORT_CHANNEL
+        value: "DragonByte_network"
+      - key: OWNER_USERNAME
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: RENDER
+        value: "true"

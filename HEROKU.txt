@@ -1,0 +1,5 @@
+ManhwaFlare Heroku notes
+- Buildpacks: ffmpeg, apt, python (see app.json)
+- Aptfile: ffmpeg
+- Procfile worker only
+- Config: BOT_TOKEN OWNER_ID MONGODB_URI LOG_CHANNEL_ID
