@@ -1,7 +1,8 @@
-# Render Docker — ffmpeg for AI video HQ download + screenshots
+# Render Docker — ffmpeg + Pyrogram MTProto (no tgcrypto / no gcc needed)
 FROM python:3.12-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -11,6 +12,5 @@ COPY . .
 
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
-ENV TG_MAX_FILE_MB=49
 
 CMD ["python", "-m", "Manhwaflare.main"]
